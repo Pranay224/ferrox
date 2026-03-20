@@ -8,7 +8,7 @@ ferrox is what happens when you build a network stack with Rust as the material.
 ## What it is
 
 ferrox is a from-scratch implementation of the core TCP/IP protocol suite,
-running entirely in userspace via a TUN device. It bypasses the Linux kernel's
+running entirely in userspace via a TAP device. It bypasses the Linux kernel's
 networking stack and implements Ethernet, ARP, IPv4, IPv6, ICMP, UDP, and TCP
 directly in safe Rust — with all unsafe code confined to a single platform
 abstraction crate.
@@ -49,7 +49,7 @@ ferrox/
 ## Building
 
 ```bash
-git clone https://github.com/<you>/ferrox
+git clone https://github.com/Pranay224/ferrox
 cd ferrox
 cargo build
 ```
