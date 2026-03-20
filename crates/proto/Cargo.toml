@@ -1,0 +1,11 @@
+[package]
+name = "proto"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[features]
+default = ["std"]
+std = []
+
+[dependencies]
