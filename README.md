@@ -43,7 +43,7 @@ ferrox/
     ├── transport/      TCP, UDP
     ├── socket/         public async socket API
     ├── sim/            in-memory test harness
-    └── netstack-cli/   binary entry point
+    └── ferrox-cli/   binary entry point
 ```
 
 ## Building
