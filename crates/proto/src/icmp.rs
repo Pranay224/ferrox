@@ -35,7 +35,7 @@ pub enum DestUnreachableCode {
 
 impl DestUnreachableCode {
     /// Parse from code byte and rest field together.
-    /// Use this instead of From<u8> to preserve MTU information.
+    /// Use this instead of `From<u8>` to preserve MTU information.
     pub fn from_wire(code: u8, rest: [u8; 4]) -> Self {
         match code {
             0 => Self::NetUnreachable,
@@ -228,7 +228,7 @@ impl IcmpPacket<'_> {
     ///
     /// # Errors
     ///
-    /// Returns [`IcmpError::BufferTooShort`] if `buf` is too short.
+    /// Returns [`IcmpError::BufferTooSmall`] if `buf` is too short.
     pub fn build_echo_reply(
         identifier: u16,
         sequence: u16,
