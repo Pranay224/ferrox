@@ -5,3 +5,8 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
+tun-rs = { version = "2", features = ["async"] }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+
+proto = { path = "../proto" }
