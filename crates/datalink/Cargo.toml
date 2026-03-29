@@ -5,3 +5,11 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
+tokio = { workspace = true }
+bytes = { workspace = true }
+zerocopy = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+lru = "0.16"
+
+proto = { path = "../proto" }

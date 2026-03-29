@@ -1,5 +1,6 @@
 [workspace]
 members = ["crates/*"]
+exclude = ["fuzz"]
 resolver = "2"
 
 [workspace.package]
@@ -8,4 +9,7 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 thiserror = "2"
-tokio = { version = "1.5", default-features = false }
+zerocopy = { version = "0.8.47", features = ["derive"] }
+tokio = { version = "1.5", default-features = false, features = ["rt", "sync", "macros"] }
+bytes = "1"
+tracing = "0.1"

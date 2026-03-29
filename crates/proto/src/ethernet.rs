@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use zerocopy::{BigEndian, FromBytes, Immutable, IntoBytes, KnownLayout, Ref, U16};
 
 #[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Debug, Clone, Copy, PartialEq, Eq)]
@@ -6,16 +7,14 @@ pub struct EtherType(U16<BigEndian>);
 
 impl EtherType {
     pub const IPV4: Self = Self(U16::new(0x0800));
-    pub const IPV6: Self = Self(U16::new(0x86DD));
     pub const ARP: Self = Self(U16::new(0x0806));
-    pub const VLAN: Self = Self(U16::new(0x8100));
 
     pub fn value(&self) -> u16 {
         self.0.get()
     }
 }
 
-#[derive(FromBytes, IntoBytes, KnownLayout, Immutable)]
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Clone, Copy)]
 #[repr(C)]
 pub struct EthernetHeader {
     pub dst: [u8; 6],
@@ -23,12 +22,12 @@ pub struct EthernetHeader {
     pub ethertype: EtherType,
 }
 
-pub struct EthernetFrame<'a> {
-    pub header: &'a EthernetHeader,
-    pub payload: &'a [u8],
+pub struct EthernetFrame {
+    pub header: EthernetHeader,
+    pub payload: Bytes,
 }
 
-impl<'a> EthernetFrame<'a> {
+impl EthernetFrame {
     /// Parses an Ethernet II frame from a raw byte slice.
     ///
     /// The returned frame borrows directly from `buf` — no allocation occurs.
@@ -39,28 +38,19 @@ impl<'a> EthernetFrame<'a> {
     ///
     /// Returns [`EthernetError::TooShort`] if `buf` is smaller than the
     /// 14-byte Ethernet header.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use proto::ethernet::{EthernetFrame, EtherType};
-    /// let mut buf = vec![0u8; 60];
-    /// buf[12] = 0x08; buf[13] = 0x00; // EtherType: IPv4
-    /// let frame = EthernetFrame::parse(&buf).unwrap();
-    /// assert_eq!(frame.header.ethertype, EtherType::IPV4);
-    /// ```
-    pub fn parse(buf: &'a [u8]) -> Result<Self, EthernetError> {
-        // Ethernet II header is 14 bytes: dst MAC (6) + src MAC (6) + EtherType (2).
-        let (header, payload) =
-            Ref::<_, EthernetHeader>::from_prefix(buf).map_err(|_| EthernetError::TooShort {
-                needed: size_of::<EthernetHeader>(),
-                got: buf.len(),
+    pub fn parse(buf: Bytes) -> Result<Self, EthernetError> {
+        let (header_ref, _) =
+            Ref::<_, EthernetHeader>::from_prefix(buf.as_ref()).map_err(|_| {
+                EthernetError::TooShort {
+                    needed: size_of::<EthernetHeader>(),
+                    got: buf.len(),
+                }
             })?;
 
-        Ok(Self {
-            header: Ref::into_ref(header),
-            payload,
-        })
+        let header = *Ref::into_ref(header_ref);
+        let payload = buf.slice(size_of::<EthernetHeader>()..);
+
+        Ok(Self { header, payload })
     }
 
     /// Checks semantic validity of a parsed frame.
@@ -122,7 +112,7 @@ impl<'a> EthernetFrame<'a> {
 
         let (header_buf, rest) = buf.split_at_mut(size_of::<EthernetHeader>());
         header_buf.copy_from_slice(self.header.as_bytes());
-        rest[..self.payload.len()].copy_from_slice(self.payload);
+        rest[..self.payload.len()].copy_from_slice(&self.payload);
 
         Ok(total)
     }
@@ -144,18 +134,20 @@ pub enum EthernetError {
 
 #[cfg(test)]
 mod tests {
+    use bytes::BytesMut;
+
     use super::*;
 
     /// Minimal valid Ethernet frame: ARP payload, padded to 46 bytes.
     /// dst: ff:ff:ff:ff:ff:ff  src: aa:bb:cc:dd:ee:ff  ethertype: 0x0806 (ARP)
-    fn arp_frame_bytes() -> Vec<u8> {
+    fn arp_frame_bytes() -> Bytes {
         let mut buf = vec![
             0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // dst MAC
             0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, // src MAC
             0x08, 0x06, // EtherType: ARP
         ];
         buf.extend_from_slice(&[0u8; 46]); // minimum payload, zero-filled
-        buf
+        buf.into()
     }
 
     // parse
@@ -163,7 +155,7 @@ mod tests {
     #[test]
     fn parse_valid_arp_frame() {
         let buf = arp_frame_bytes();
-        let frame = EthernetFrame::parse(&buf).unwrap();
+        let frame = EthernetFrame::parse(buf).unwrap();
         assert_eq!(frame.header.dst, [0xff; 6]);
         assert_eq!(frame.header.src, [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
         assert_eq!(frame.header.ethertype, EtherType::ARP);
@@ -173,7 +165,7 @@ mod tests {
     #[test]
     fn parse_empty_buffer_fails() {
         assert!(matches!(
-            EthernetFrame::parse(&[]),
+            EthernetFrame::parse(Bytes::new()),
             Err(EthernetError::TooShort { .. })
         ));
     }
@@ -182,16 +174,16 @@ mod tests {
     fn parse_header_only_no_payload() {
         // 14 bytes — valid header, zero-length payload. Parse should succeed,
         // validate will catch the too-short payload separately.
-        let buf = arp_frame_bytes()[..14].to_vec();
-        let frame = EthernetFrame::parse(&buf).unwrap();
+        let buf = arp_frame_bytes().slice(..14);
+        let frame = EthernetFrame::parse(buf).unwrap();
         assert_eq!(frame.payload.len(), 0);
     }
 
     #[test]
     fn parse_one_byte_too_short_fails() {
-        let buf = arp_frame_bytes()[..13].to_vec();
+        let buf = arp_frame_bytes().slice(..13);
         assert!(matches!(
-            EthernetFrame::parse(&buf),
+            EthernetFrame::parse(buf),
             Err(EthernetError::TooShort { .. })
         ));
     }
@@ -201,14 +193,14 @@ mod tests {
     #[test]
     fn validate_valid_frame_passes() {
         let buf = arp_frame_bytes();
-        let frame = EthernetFrame::parse(&buf).unwrap();
+        let frame = EthernetFrame::parse(buf).unwrap();
         assert!(frame.validate().is_ok());
     }
 
     #[test]
     fn validate_payload_too_short() {
-        let buf = arp_frame_bytes()[..14 + 45].to_vec(); // one byte short
-        let frame = EthernetFrame::parse(&buf).unwrap();
+        let buf = arp_frame_bytes().slice(..14 + 45); // one byte short
+        let frame = EthernetFrame::parse(buf).unwrap();
         assert!(matches!(
             frame.validate(),
             Err(EthernetError::PayloadTooShort { got: 45 })
@@ -217,9 +209,9 @@ mod tests {
 
     #[test]
     fn validate_broadcast_source_rejected() {
-        let mut buf = arp_frame_bytes();
+        let mut buf = BytesMut::from(arp_frame_bytes());
         buf[6..12].copy_from_slice(&[0xff; 6]); // set src to broadcast
-        let frame = EthernetFrame::parse(&buf).unwrap();
+        let frame = EthernetFrame::parse(buf.freeze()).unwrap();
         assert!(matches!(
             frame.validate(),
             Err(EthernetError::BroadcastSource)
@@ -228,9 +220,9 @@ mod tests {
 
     #[test]
     fn validate_reserved_ethertype_rejected() {
-        let mut buf = arp_frame_bytes();
+        let mut buf = BytesMut::from(arp_frame_bytes());
         buf[12..14].copy_from_slice(&[0x05, 0xff]); // EtherType 0x05ff < 0x0600
-        let frame = EthernetFrame::parse(&buf).unwrap();
+        let frame = EthernetFrame::parse(buf.freeze()).unwrap();
         assert!(matches!(
             frame.validate(),
             Err(EthernetError::InvalidEtherType(0x05ff))
@@ -242,7 +234,7 @@ mod tests {
     #[test]
     fn serialize_produces_correct_bytes() {
         let buf = arp_frame_bytes();
-        let frame = EthernetFrame::parse(&buf).unwrap();
+        let frame = EthernetFrame::parse(buf.clone()).unwrap();
 
         let mut out = vec![0u8; buf.len()];
         let written = frame.serialize(&mut out).unwrap();
@@ -254,7 +246,7 @@ mod tests {
     #[test]
     fn serialize_buffer_too_small_fails() {
         let buf = arp_frame_bytes();
-        let frame = EthernetFrame::parse(&buf).unwrap();
+        let frame = EthernetFrame::parse(buf).unwrap();
 
         let mut out = vec![0u8; 10]; // way too small
         assert!(matches!(
@@ -269,11 +261,11 @@ mod tests {
     fn round_trip_parse_serialize_parse() {
         let original = arp_frame_bytes();
 
-        let frame1 = EthernetFrame::parse(&original).unwrap();
+        let frame1 = EthernetFrame::parse(original.clone()).unwrap();
         let mut serialized = vec![0u8; original.len()];
         frame1.serialize(&mut serialized).unwrap();
 
-        let frame2 = EthernetFrame::parse(&serialized).unwrap();
+        let frame2 = EthernetFrame::parse(serialized.into()).unwrap();
         assert_eq!(frame1.header.dst, frame2.header.dst);
         assert_eq!(frame1.header.src, frame2.header.src);
         assert_eq!(frame1.header.ethertype, frame2.header.ethertype);

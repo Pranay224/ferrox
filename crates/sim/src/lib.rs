@@ -80,6 +80,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // Truncation is silent — bytes beyond buf.len() are lost.
+    // In real usage the RX loop always provides a 1514-byte buffer
+    // so truncation should never occur for valid Ethernet frames.
     async fn test_truncation() {
         let (pipe_a, pipe_b) = Pipe::pair();
         let (_rx, tx) = pipe_a.split();

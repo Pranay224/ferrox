@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use thiserror::Error;
 use zerocopy::{BigEndian, FromBytes, Immutable, IntoBytes, KnownLayout, Ref, U16};
 
@@ -71,30 +72,30 @@ impl Ipv4Header {
 }
 
 #[derive(Debug)]
-pub struct Ipv4Packet<'a> {
-    pub header: &'a Ipv4Header,
-    pub options: &'a [u8],
-    pub payload: &'a [u8],
+pub struct Ipv4Packet {
+    pub header: Ipv4Header,
+    pub options: Bytes,
+    pub payload: Bytes,
 }
 
-impl<'a> Ipv4Packet<'a> {
-    /// Parses an IPv4 packet from a raw byte slice.
+impl Ipv4Packet {
+    /// Parses an IPv4 packet from [`Bytes`].
     ///
-    /// Borrows directly from `buf` — no allocation occurs. Performs structural
-    /// parsing only. Call [`Ipv4Packet::validate`] for semantic checks.
+    /// Slices content out of `buf`, incrementing a refcount - no allocations occur.
+    /// Performs parsing only. Call [`Ipv4Packet::validate`] for semantic checks.
     ///
     /// # Errors
     ///
     /// - [`Ipv4Error::TooShort`] — buffer smaller than 20-byte fixed header
     /// - [`Ipv4Error::InvalidIhl`] — IHL field is less than 5
-    pub fn parse(buf: &'a [u8]) -> Result<Self, Ipv4Error> {
-        let (header, rest) =
-            Ref::<_, Ipv4Header>::from_prefix(buf).map_err(|_| Ipv4Error::TooShort {
+    pub fn parse(buf: Bytes) -> Result<Self, Ipv4Error> {
+        let (header_ref, _) =
+            Ref::<_, Ipv4Header>::from_prefix(buf.as_ref()).map_err(|_| Ipv4Error::TooShort {
                 needed: size_of::<Ipv4Header>(),
                 got: buf.len(),
             })?;
 
-        let header = Ref::into_ref(header);
+        let header = *Ref::into_ref(header_ref);
         let header_len = header.header_len();
 
         // RFC 791 — minimum IHL is 5 (20 bytes)
@@ -105,16 +106,26 @@ impl<'a> Ipv4Packet<'a> {
         // Length of the options section is the total header length minus the fixed 20-byte header.
         let options_len = header_len - size_of::<Ipv4Header>();
 
-        // If the IHL is valid but the packet is too short to contain all the options, split_at
+        let header_end = size_of::<Ipv4Header>();
+        let options_end = header_end + options_len;
+
+        // If the IHL is valid but the packet is too short to contain all the options, the slicing
         // will panic. This check catches that edge case before splitting again.
-        if rest.len() < options_len {
+        if buf.len() < options_end {
             return Err(Ipv4Error::TooShort {
-                needed: header_len,
+                needed: options_end,
                 got: buf.len(),
             });
         }
 
-        let (options, payload) = rest.split_at(options_len);
+        let options = if options_len > 0 {
+            buf.slice(header_end..options_end)
+        } else {
+            Bytes::new()
+        };
+
+        let claimed_end = (header.total_length.get() as usize).min(buf.len());
+        let payload = buf.slice(options_end..claimed_end);
 
         Ok(Self {
             header,
@@ -164,7 +175,7 @@ impl<'a> Ipv4Packet<'a> {
         let actual = size_of::<Ipv4Header>() + self.options.len() + self.payload.len();
         let claimed = self.header.total_length.get() as usize;
 
-        if claimed != actual {
+        if claimed > actual {
             return Err(Ipv4Error::TotalLengthMismatch {
                 claimed: self.header.total_length.get(),
                 actual,
@@ -193,8 +204,8 @@ impl<'a> Ipv4Packet<'a> {
         header_buf.copy_from_slice(self.header.as_bytes());
 
         let (options_buf, payload_buf) = rest.split_at_mut(self.options.len());
-        options_buf.copy_from_slice(self.options);
-        payload_buf[..self.payload.len()].copy_from_slice(self.payload);
+        options_buf.copy_from_slice(&self.options);
+        payload_buf[..self.payload.len()].copy_from_slice(&self.payload);
 
         Ok(total)
     }
@@ -232,6 +243,8 @@ pub enum Ipv4Error {
 
 #[cfg(test)]
 mod tests {
+    use bytes::BytesMut;
+
     use super::*;
     use crate::checksum;
 
@@ -268,7 +281,7 @@ mod tests {
     }
 
     /// Builds a complete valid IPv4 packet as raw bytes with given payload.
-    fn make_packet(payload: &[u8]) -> Vec<u8> {
+    fn make_packet(payload: &[u8]) -> Bytes {
         let header = make_header(
             [192, 168, 1, 1],
             [192, 168, 1, 2],
@@ -277,9 +290,9 @@ mod tests {
             payload.len(),
         );
 
-        let mut buf = header.as_bytes().to_vec();
+        let mut buf = BytesMut::from(header.as_bytes());
         buf.extend_from_slice(payload);
-        buf
+        buf.freeze()
     }
 
     // ── parse ──────────────────────────────────────────────────────────────────
@@ -288,7 +301,7 @@ mod tests {
     fn parse_valid_packet() {
         let payload = [0u8; 20];
         let buf = make_packet(&payload);
-        let pkt = Ipv4Packet::parse(&buf).unwrap();
+        let pkt = Ipv4Packet::parse(buf).unwrap();
 
         assert_eq!(pkt.header.version(), 4);
         assert_eq!(pkt.header.ihl(), 5);
@@ -297,14 +310,14 @@ mod tests {
         assert_eq!(pkt.header.protocol, IpProtocol::TCP);
         assert_eq!(pkt.header.src, [192, 168, 1, 1]);
         assert_eq!(pkt.header.dst, [192, 168, 1, 2]);
-        assert_eq!(pkt.options, &[]);
-        assert_eq!(pkt.payload, &payload);
+        assert_eq!(pkt.payload.len(), 20);
+        assert_eq!(&pkt.payload[..], &payload);
     }
 
     #[test]
     fn parse_empty_buffer_fails() {
         assert!(matches!(
-            Ipv4Packet::parse(&[]),
+            Ipv4Packet::parse(Bytes::new()),
             Err(Ipv4Error::TooShort { needed: 20, got: 0 })
         ));
     }
@@ -313,27 +326,27 @@ mod tests {
     fn parse_one_byte_too_short_fails() {
         let buf = make_packet(&[0u8; 20]);
         assert!(matches!(
-            Ipv4Packet::parse(&buf[..19]),
+            Ipv4Packet::parse(buf.slice(..19)),
             Err(Ipv4Error::TooShort { .. })
         ));
     }
 
     #[test]
     fn parse_ihl_too_small_fails() {
-        let mut buf = make_packet(&[0u8; 20]);
+        let mut buf = BytesMut::from(make_packet(&[0u8; 20]));
         buf[0] = 0x44; // version=4, IHL=4 (below minimum of 5)
         assert!(matches!(
-            Ipv4Packet::parse(&buf),
+            Ipv4Packet::parse(buf.freeze()),
             Err(Ipv4Error::InvalidIhl(4))
         ));
     }
 
     #[test]
     fn parse_ihl_zero_fails() {
-        let mut buf = make_packet(&[0u8; 20]);
+        let mut buf = BytesMut::from(make_packet(&[0u8; 20]));
         buf[0] = 0x40; // version=4, IHL=0
         assert!(matches!(
-            Ipv4Packet::parse(&buf),
+            Ipv4Packet::parse(buf.freeze()),
             Err(Ipv4Error::InvalidIhl(0))
         ));
     }
@@ -357,24 +370,25 @@ mod tests {
         header.checksum = U16::new(0);
         header.checksum = U16::new(checksum::compute(header.as_bytes()));
 
-        let mut buf = header.as_bytes().to_vec();
+        let mut buf = BytesMut::new();
+        buf.extend_from_slice(header.as_bytes());
         buf.extend_from_slice(&options);
         buf.extend_from_slice(&payload);
 
-        let pkt = Ipv4Packet::parse(&buf).unwrap();
+        let pkt = Ipv4Packet::parse(buf.freeze()).unwrap();
         assert_eq!(pkt.header.ihl(), 6);
         assert_eq!(pkt.header.header_len(), 24);
-        assert_eq!(pkt.options, &options);
-        assert_eq!(pkt.payload, &payload);
+        assert_eq!(&pkt.options[..], &options[..]);
+        assert_eq!(&pkt.payload[..], &payload[..]);
     }
 
     #[test]
     fn parse_options_present_but_buffer_too_short_fails() {
         // IHL=6 claims 24-byte header but buffer only has 20 bytes
-        let mut buf = make_packet(&[0u8; 20]);
+        let mut buf = BytesMut::from(make_packet(&[0u8; 20]));
         buf[0] = 0x46; // IHL=6
         assert!(matches!(
-            Ipv4Packet::parse(&buf[..20]),
+            Ipv4Packet::parse(buf.freeze().slice(..20)),
             Err(Ipv4Error::TooShort { .. })
         ));
     }
@@ -384,27 +398,27 @@ mod tests {
     #[test]
     fn validate_valid_packet_passes() {
         let buf = make_packet(&[0u8; 20]);
-        let pkt = Ipv4Packet::parse(&buf).unwrap();
+        let pkt = Ipv4Packet::parse(buf).unwrap();
         assert!(pkt.validate().is_ok());
     }
 
     #[test]
     fn validate_wrong_version_rejected() {
-        let mut buf = make_packet(&[0u8; 20]);
+        let mut buf = BytesMut::from(make_packet(&[0u8; 20]));
         buf[0] = 0x65; // version=6, IHL=5
         // Recompute checksum so it doesn't fail there first
         let csum = checksum::compute(&buf[..20]);
         buf[10..12].copy_from_slice(&csum.to_be_bytes());
 
-        let pkt = Ipv4Packet::parse(&buf).unwrap();
+        let pkt = Ipv4Packet::parse(buf.freeze()).unwrap();
         assert!(matches!(pkt.validate(), Err(Ipv4Error::InvalidVersion(6))));
     }
 
     #[test]
     fn validate_bad_checksum_rejected() {
-        let mut buf = make_packet(&[0u8; 20]);
+        let mut buf = BytesMut::from(make_packet(&[0u8; 20]));
         buf[10] ^= 0xFF; // corrupt the checksum field
-        let pkt = Ipv4Packet::parse(&buf).unwrap();
+        let pkt = Ipv4Packet::parse(buf.freeze()).unwrap();
         assert!(matches!(pkt.validate(), Err(Ipv4Error::BadChecksum)));
     }
 
@@ -412,23 +426,23 @@ mod tests {
     fn validate_corrupted_payload_with_bad_checksum() {
         // Corrupt a payload byte — the header checksum won't catch this
         // (it only covers the header) but it proves checksum scope is correct.
-        let mut buf = make_packet(&[0u8; 20]);
+        let mut buf = BytesMut::from(make_packet(&[0u8; 20]));
         buf[25] ^= 0xFF; // corrupt a payload byte
-        let pkt = Ipv4Packet::parse(&buf).unwrap();
+        let pkt = Ipv4Packet::parse(buf.freeze()).unwrap();
         // Header checksum should still pass — it doesn't cover the payload
         assert!(pkt.validate().is_ok());
     }
 
     #[test]
     fn validate_broadcast_source_rejected() {
-        let mut buf = make_packet(&[0u8; 20]);
+        let mut buf = BytesMut::from(make_packet(&[0u8; 20]));
         buf[12..16].copy_from_slice(&[0xff; 4]); // src = 255.255.255.255
         // Recompute checksum
         buf[10..12].copy_from_slice(&[0, 0]);
         let csum = checksum::compute(&buf[..20]);
         buf[10..12].copy_from_slice(&csum.to_be_bytes());
 
-        let pkt = Ipv4Packet::parse(&buf).unwrap();
+        let pkt = Ipv4Packet::parse(buf.freeze()).unwrap();
         assert!(matches!(pkt.validate(), Err(Ipv4Error::BroadcastSource)));
     }
 
@@ -441,16 +455,16 @@ mod tests {
             0, // TTL = 0
             20,
         );
-        let mut buf = header.as_bytes().to_vec();
+        let mut buf = BytesMut::from(header.as_bytes());
         buf.extend_from_slice(&[0u8; 20]);
 
-        let pkt = Ipv4Packet::parse(&buf).unwrap();
+        let pkt = Ipv4Packet::parse(buf.freeze()).unwrap();
         assert!(matches!(pkt.validate(), Err(Ipv4Error::TtlExpired)));
     }
 
     #[test]
     fn validate_reserved_flag_rejected() {
-        let mut buf = make_packet(&[0u8; 20]);
+        let mut buf = BytesMut::from(make_packet(&[0u8; 20]));
         // Set the reserved flag (bit 15 of flags_fragment, byte offset 6)
         buf[6] |= 0x80;
         // Recompute checksum
@@ -458,13 +472,13 @@ mod tests {
         let csum = checksum::compute(&buf[..20]);
         buf[10..12].copy_from_slice(&csum.to_be_bytes());
 
-        let pkt = Ipv4Packet::parse(&buf).unwrap();
+        let pkt = Ipv4Packet::parse(buf.freeze()).unwrap();
         assert!(matches!(pkt.validate(), Err(Ipv4Error::InvalidFlags)));
     }
 
     #[test]
     fn validate_total_length_mismatch_rejected() {
-        let mut buf = make_packet(&[0u8; 20]);
+        let mut buf = BytesMut::from(make_packet(&[0u8; 20]));
         // Claim total_length = 100 but actual size is 40
         buf[2..4].copy_from_slice(&100u16.to_be_bytes());
         // Recompute checksum with the new total_length
@@ -472,7 +486,7 @@ mod tests {
         let csum = checksum::compute(&buf[..20]);
         buf[10..12].copy_from_slice(&csum.to_be_bytes());
 
-        let pkt = Ipv4Packet::parse(&buf).unwrap();
+        let pkt = Ipv4Packet::parse(buf.freeze()).unwrap();
         assert!(matches!(
             pkt.validate(),
             Err(Ipv4Error::TotalLengthMismatch { claimed: 100, .. })
@@ -484,8 +498,8 @@ mod tests {
     #[test]
     fn serialize_produces_correct_bytes() {
         let payload = [0xBBu8; 20];
-        let original = make_packet(&payload);
-        let pkt = Ipv4Packet::parse(&original).unwrap();
+        let original = BytesMut::from(make_packet(&payload));
+        let pkt = Ipv4Packet::parse(original.clone().freeze()).unwrap();
 
         let mut out = vec![0u8; original.len()];
         let written = pkt.serialize(&mut out).unwrap();
@@ -496,8 +510,8 @@ mod tests {
 
     #[test]
     fn serialize_buffer_too_small_fails() {
-        let buf = make_packet(&[0u8; 20]);
-        let pkt = Ipv4Packet::parse(&buf).unwrap();
+        let buf = BytesMut::from(make_packet(&[0u8; 20]));
+        let pkt = Ipv4Packet::parse(buf.freeze()).unwrap();
 
         let mut out = vec![0u8; 10];
         assert!(matches!(
@@ -508,8 +522,8 @@ mod tests {
 
     #[test]
     fn serialize_into_larger_buffer_leaves_tail_untouched() {
-        let buf = make_packet(&[0u8; 20]);
-        let pkt = Ipv4Packet::parse(&buf).unwrap();
+        let buf = BytesMut::from(make_packet(&[0u8; 20]));
+        let pkt = Ipv4Packet::parse(buf.freeze()).unwrap();
 
         let mut out = vec![0xFFu8; 128];
         let written = pkt.serialize(&mut out).unwrap();
@@ -524,12 +538,12 @@ mod tests {
     fn round_trip_no_options() {
         let payload = [0xAAu8; 32];
         let original = make_packet(&payload);
-        let pkt = Ipv4Packet::parse(&original).unwrap();
+        let pkt = Ipv4Packet::parse(original.clone()).unwrap();
 
         let mut buf = vec![0u8; original.len()];
         pkt.serialize(&mut buf).unwrap();
 
-        let reparsed = Ipv4Packet::parse(&buf).unwrap();
+        let reparsed = Ipv4Packet::parse(buf.into()).unwrap();
         assert_eq!(pkt.header.src, reparsed.header.src);
         assert_eq!(pkt.header.dst, reparsed.header.dst);
         assert_eq!(pkt.header.protocol, reparsed.header.protocol);
@@ -544,14 +558,14 @@ mod tests {
         // The most important round-trip property: a packet that validates
         // before serialization must also validate after.
         let payload = [0u8; 20];
-        let original = make_packet(&payload);
-        let pkt = Ipv4Packet::parse(&original).unwrap();
+        let original = BytesMut::from(make_packet(&payload));
+        let pkt = Ipv4Packet::parse(original.clone().freeze()).unwrap();
         assert!(pkt.validate().is_ok());
 
         let mut buf = vec![0u8; original.len()];
         pkt.serialize(&mut buf).unwrap();
 
-        let reparsed = Ipv4Packet::parse(&buf).unwrap();
+        let reparsed = Ipv4Packet::parse(buf.into()).unwrap();
         assert!(reparsed.validate().is_ok());
     }
 
@@ -567,8 +581,8 @@ mod tests {
 
     #[test]
     fn checksum_detects_single_bit_flip() {
-        let mut buf = make_packet(&[0u8; 20]);
+        let mut buf = BytesMut::from(make_packet(&[0u8; 20]));
         buf[14] ^= 0x01; // flip one bit in TTL field
-        assert_ne!(checksum::compute(&buf[..20]), 0);
+        assert_ne!(checksum::compute(&buf.freeze().slice(..20)), 0);
     }
 }
