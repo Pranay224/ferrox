@@ -47,29 +47,13 @@ impl PrefixLen {
     }
 }
 
-/// A valid unicast MAC address.
-///
-/// Rejects broadcast (`ff:ff:ff:ff:ff:ff`) and multicast
-/// (LSB of first octet set) addresses.
+/// A valid MAC address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MacAddr([u8; 6]);
 
-impl TryFrom<[u8; 6]> for MacAddr {
-    type Error = InterfaceError;
-
-    fn try_from(mac: [u8; 6]) -> Result<Self, Self::Error> {
-        // Reject broadcast address
-        if mac == [0xFF; 6] {
-            return Err(InterfaceError::InvalidMac(mac));
-        }
-
-        // Reject multicast — LSB of first octet indicates multicast
-        // IEEE 802 — bit 0 of the first octet is the I/G (individual/group) bit
-        if mac[0] & 0x01 != 0 {
-            return Err(InterfaceError::InvalidMac(mac));
-        }
-
-        Ok(Self(mac))
+impl From<[u8; 6]> for MacAddr {
+    fn from(value: [u8; 6]) -> Self {
+        Self(value)
     }
 }
 
@@ -77,6 +61,16 @@ impl MacAddr {
     /// Returns the raw MAC address bytes.
     pub fn get(self) -> [u8; 6] {
         self.0
+    }
+
+    /// Returns whether the address is broadcast
+    pub fn is_broadcast(&self) -> bool {
+        self.get() == [0xff; 6]
+    }
+
+    /// Returns whether the address is unicast (LSB of first octet is 0)
+    pub fn is_unicast(&self) -> bool {
+        self.get()[0] & 1 == 0
     }
 }
 
@@ -97,7 +91,4 @@ pub struct InterfaceConfig {
 pub enum InterfaceError {
     #[error("invalid prefix length {0}: must be 0–32")]
     InvalidPrefixLen(u8),
-
-    #[error("invalid MAC address {0:02x?}: must be a unicast address")]
-    InvalidMac([u8; 6]),
 }

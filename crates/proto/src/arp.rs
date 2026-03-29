@@ -39,10 +39,13 @@ impl ArpPacket {
     ///
     /// - [`ArpError::InvalidBufferLength`] is buf is not exactly `size_of::<ArpPacket>()` bytes long.
     pub fn parse(buf: &[u8]) -> Result<Self, ArpError> {
-        ArpPacket::read_from_bytes(buf).map_err(|_| ArpError::InvalidBufferLength {
-            needed: size_of::<ArpPacket>(),
-            got: buf.len(),
-        })
+        let (pkt, _) =
+            ArpPacket::read_from_prefix(buf).map_err(|_| ArpError::InvalidBufferLength {
+                needed: size_of::<ArpPacket>(),
+                got: buf.len(),
+            })?;
+
+        Ok(pkt)
     }
 
     /// Checks semantic validity of parsed ARP packets.
@@ -218,16 +221,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_oversized_buffer_fails() {
-        // read_from_bytes requires exact size — extra bytes are an error.
-        // This is correct behaviour: ARP is fixed 28 bytes, extra bytes
-        // indicate a framing error upstream in Ethernet parsing.
-        let mut buf = arp_request_bytes();
-        buf.push(0x00);
-        assert!(matches!(
-            ArpPacket::parse(&buf),
-            Err(ArpError::InvalidBufferLength { .. })
-        ));
+    fn parse_with_trailing_padding_succeeds() {
+        let mut buf = arp_request_bytes(); // 28 bytes
+        buf.extend_from_slice(&[0u8; 18]); // Ethernet padding
+        let pkt = ArpPacket::parse(&buf).unwrap();
+        assert_eq!(pkt.oper, ArpOperation::REQUEST);
+        // fields are correct despite extra bytes
     }
 
     // validate

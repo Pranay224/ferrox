@@ -67,12 +67,18 @@ impl TapDeviceBuilder {
     ///
     /// - [`PalError::MissingField`] — a required field was not set
     /// - [`PalError::InvalidIfaceName`] — name is empty or over 15 characters
+    /// - [`PalError::InvalidMac`] — the provided mac is not unicast
     /// - [`PalError::InitializationError`] — the OS rejected device creation
     pub fn build(self) -> Result<TapDevice, PalError> {
         let ip = self.ip.ok_or(PalError::MissingField("ip"))?;
         let prefix = self.prefix.ok_or(PalError::MissingField("prefix"))?;
         let mac = self.mac.ok_or(PalError::MissingField("mac"))?;
         let name = self.name.unwrap_or_else(|| "tap0".to_string());
+
+        // Interface must have a unicast mac
+        if !mac.is_unicast() {
+            return Err(PalError::InvalidMac(mac));
+        }
 
         // Linux interface names are at most IFNAMSIZ-1 = 15 characters
         if name.is_empty() || name.len() > 15 {
@@ -151,6 +157,9 @@ impl PacketSink for TapTx {
 pub enum PalError {
     #[error("invalid interface name '{0}': must be 1–15 characters")]
     InvalidIfaceName(String),
+
+    #[error("MAC address must be unicast, got {0:?}")]
+    InvalidMac(MacAddr),
 
     #[error("missing required field: {0}")]
     MissingField(&'static str),
