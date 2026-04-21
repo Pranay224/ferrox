@@ -3,6 +3,7 @@ use proto::{iface::MacAddr, txbuf::TxBuf};
 use std::net::Ipv4Addr;
 
 /// Upwards data sent to network layer
+#[derive(Debug)]
 pub struct InboundIpv4 {
     pub src_mac: MacAddr,
     pub payload: Bytes,

@@ -23,11 +23,11 @@ Phase 1 in progress — workspace and CI set up, parsers not yet started.
 
 | Phase | Description | Status |
 |---|---|---|
-| 1 | Scaffolding, packet I/O, Ethernet/ARP/IP/ICMP parsers | 🔧 In progress |
-| 2 | IP forwarding, routing table, UDP | ⏳ Pending |
-| 3 | TCP core | ⏳ Pending |
-| 4 | TCP hardening — SACK, congestion control | ⏳ Pending |
-| 5 | Observability, benchmarks, polish | ⏳ Pending |
+| 1 | Scaffolding, packet I/O, Ethernet/ARP/IP/ICMP parsers | Done |
+| 2 | IP forwarding, routing table, UDP | Pending |
+| 3 | TCP core | Pending |
+| 4 | TCP hardening — SACK, congestion control | Pending |
+| 5 | Observability, benchmarks, polish | Pending |
 
 ## Workspace structure
 
