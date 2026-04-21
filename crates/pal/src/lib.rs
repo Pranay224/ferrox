@@ -114,16 +114,16 @@ pub struct TapDevice {
 }
 
 impl TapDevice {
-    /// Splits the device into independent RX and TX halves.
+    /// Splits the device into independent TX and RX halves.
     ///
     /// Both halves share the underlying device via `Arc`. Safe to
     /// move into separate tokio tasks — no locking required.
-    pub fn split(self) -> (TapRx, TapTx) {
+    pub fn split(self) -> (TapTx, TapRx) {
         (
-            TapRx {
+            TapTx {
                 inner: Arc::clone(&self.inner),
             },
-            TapTx {
+            TapRx {
                 inner: Arc::clone(&self.inner),
             },
         )

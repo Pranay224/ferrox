@@ -8,49 +8,86 @@ use bytes::Bytes;
 use proto::{
     arp::{ArpOperation, ArpPacket},
     ethernet::{EtherType, EthernetFrame, EthernetHeader},
-    iface::MacAddr,
+    iface::{MacAddr, PacketSink, PacketSource},
     txbuf::TxBuf,
 };
 use std::{collections::HashMap, net::Ipv4Addr};
 use thiserror::Error;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use zerocopy::{BigEndian, IntoBytes, U16};
 
 pub mod cache;
 pub mod messages;
 
-pub struct DataLink {
+/// DataLink layer representation, handling all layer 2 logic.
+///
+/// # Responsibilities
+///
+/// - Ethernet frame parsing and dispatch
+/// - ARP handling with request/reply and caching
+/// - Queueing outbound packets while ARP resolution is pending
+///
+/// Communicates with the wire using the [`PacketSource`]/[`PacketSink`] traits, allowing for
+/// pluggable backends for testing and usage.
+pub struct DataLink<Tx, Rx>
+where
+    Tx: PacketSink,
+    Rx: PacketSource,
+{
+    /// Interface MAC address
     our_mac: MacAddr,
+    /// Interface IP address
     our_ip: Ipv4Addr,
+    /// ARP cache for IP to MAC mappings
     arp_cache: ArpCache,
+    /// Packets waiting for ARP resolution
     outbound_queue: HashMap<Ipv4Addr, Vec<OutboundFrame>>,
-    tap_tx: mpsc::Sender<Bytes>,
-    tap_rx: mpsc::Receiver<Bytes>,
+    /// Transmit handle to the wire
+    wire_tx: Tx,
+    /// Receive handle from the wire
+    wire_rx: Rx,
+    /// Upward channel to network layer
     nw_tx: mpsc::Sender<InboundIpv4>,
+    /// Downward channel from network layer
     nw_rx: mpsc::Receiver<DataLinkRequest>,
+    /// Cancellation token for graceful shutdown
+    token: CancellationToken,
 }
 
-impl DataLink {
+impl<Tx, Rx> DataLink<Tx, Rx>
+where
+    Tx: PacketSink,
+    Rx: PacketSource,
+{
+    /// Create a new [`DataLink`] instance
     pub fn new(
         our_mac: MacAddr,
         our_ip: Ipv4Addr,
-        tap_tx: mpsc::Sender<Bytes>,
-        tap_rx: mpsc::Receiver<Bytes>,
+        wire_tx: Tx,
+        wire_rx: Rx,
         nw_tx: mpsc::Sender<InboundIpv4>,
         nw_rx: mpsc::Receiver<DataLinkRequest>,
+        token: CancellationToken,
     ) -> Self {
         DataLink {
             our_mac,
             our_ip,
             arp_cache: ArpCache::new(ARP_CACHE_LIMIT, ARP_TTL_LIMIT),
             outbound_queue: HashMap::new(),
-            tap_tx,
-            tap_rx,
+            wire_tx,
+            wire_rx,
             nw_tx,
             nw_rx,
+            token,
         }
     }
 
+    /// Main event loop of the [`DataLink`] layer.
+    ///
+    /// Concurrently:
+    /// - Receives frames from the wire
+    /// - Receives outbound requests from network layer
     pub async fn run(mut self) {
         tracing::info!(
             our_mac = ?self.our_mac,
@@ -58,11 +95,25 @@ impl DataLink {
             "datalink layer started"
         );
 
+        // Reusable buffer for receiving frames
+        let mut buf = vec![0u8; 1514];
+
         loop {
             tokio::select! {
-                Some(frame) = self.tap_rx.recv() => {
-                    if let Err(e) = self.handle_frame(frame).await {
-                        tracing::warn!("handle_frame error: {e}");
+                _ = self.token.cancelled() => {
+                    tracing::info!("DataLink shutting down.");
+                    break;
+                }
+
+                result = self.wire_rx.recv(&mut buf) => {
+                    match result {
+                        Ok(n) => {
+                            let frame = Bytes::copy_from_slice(&buf[..n]);
+                            if let Err(e) = self.handle_frame(frame).await {
+                                tracing::warn!("handle_frame error: {e}");
+                            }
+                        }
+                        Err(e) => tracing::warn!("wire_rx error: {e}"),
                     }
                 }
 
@@ -264,10 +315,11 @@ impl DataLink {
         };
 
         buf.prepend(header.as_bytes());
-        self.tap_tx
-            .send(buf.freeze())
+
+        self.wire_tx
+            .send(&buf.freeze())
             .await
-            .map_err(|_| DataLinkError::TapChannelClosed)?;
+            .map_err(|_| DataLinkError::WireChannelClosed)?;
 
         Ok(())
     }
@@ -275,8 +327,8 @@ impl DataLink {
 
 #[derive(Error, Debug)]
 pub enum DataLinkError {
-    #[error("tap channel closed")]
-    TapChannelClosed,
+    #[error("wire channel closed")]
+    WireChannelClosed,
 
     #[error("network channel closed")]
     NetworkChannelClosed,
@@ -284,9 +336,8 @@ pub enum DataLinkError {
 
 #[cfg(test)]
 mod tests {
-    use proto::txbuf::ETH_HEADER_LEN;
-
     use super::*;
+    use proto::txbuf::ETH_HEADER_LEN;
 
     fn our_mac() -> MacAddr {
         MacAddr::from([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff])
@@ -296,22 +347,49 @@ mod tests {
         Ipv4Addr::new(10, 0, 0, 1)
     }
 
+    struct NullSource;
+
+    impl PacketSource for NullSource {
+        async fn recv(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            std::future::pending().await
+        }
+    }
+
+    struct CaptureSink {
+        tx: mpsc::Sender<Bytes>,
+    }
+
+    impl PacketSink for CaptureSink {
+        async fn send(&self, buf: &[u8]) -> std::io::Result<()> {
+            let _ = self.tx.send(Bytes::copy_from_slice(buf)).await;
+            Ok(())
+        }
+    }
+
     struct TestHarness {
-        dl: DataLink,
+        dl: DataLink<CaptureSink, NullSource>,
         tap_out: mpsc::Receiver<Bytes>,
         nw_up: mpsc::Receiver<InboundIpv4>,
     }
 
     impl TestHarness {
         fn new() -> Self {
-            let (tap_tx, tap_out) = mpsc::channel(16);
-            let (_tap_in, tap_rx) = mpsc::channel(16);
+            let (cap_tx, tap_out) = mpsc::channel(16);
+
             let (nw_tx, nw_up) = mpsc::channel(16);
             let (_nw_down, nw_rx) = mpsc::channel(16);
 
-            let dl = DataLink::new(our_mac(), our_ip(), tap_tx, tap_rx, nw_tx, nw_rx);
+            let dl = DataLink::new(
+                our_mac(),
+                our_ip(),
+                CaptureSink { tx: cap_tx },
+                NullSource,
+                nw_tx,
+                nw_rx,
+                tokio_util::sync::CancellationToken::new(),
+            );
 
-            Self { dl, tap_out, nw_up }
+            TestHarness { dl, tap_out, nw_up }
         }
     }
 
@@ -596,7 +674,7 @@ mod tests {
         let mut h = TestHarness::new();
 
         let src_mac = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
-        let payload = [0xAA; 46]; // 46 bytes to pass validate
+        let payload = [0xAA; 46];
 
         let frame_bytes = wrap_in_eth(our_mac().get(), src_mac, EtherType::IPV4, &payload);
 

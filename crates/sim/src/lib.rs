@@ -26,8 +26,8 @@ impl Pipe {
     }
 
     /// Splits a pipe into two halves - one for sending and one for receiving.
-    pub fn split(self) -> (PipeRx, PipeTx) {
-        (PipeRx { rx: self.rx }, PipeTx { tx: self.tx })
+    pub fn split(self) -> (PipeTx, PipeRx) {
+        (PipeTx { tx: self.tx }, PipeRx { rx: self.rx })
     }
 }
 
@@ -61,8 +61,8 @@ mod tests {
     #[tokio::test]
     async fn test_trait_send_recv() {
         let (pipe_a, pipe_b) = Pipe::pair();
-        let (mut rx, tx) = pipe_b.split();
-        let (mut rx2, tx2) = pipe_a.split();
+        let (tx, mut rx) = pipe_b.split();
+        let (tx2, mut rx2) = pipe_a.split();
 
         let msg = b"ping";
 
@@ -85,8 +85,8 @@ mod tests {
     // so truncation should never occur for valid Ethernet frames.
     async fn test_truncation() {
         let (pipe_a, pipe_b) = Pipe::pair();
-        let (_rx, tx) = pipe_a.split();
-        let (mut rx2, _tx2) = pipe_b.split();
+        let (tx, _rx) = pipe_a.split();
+        let (_tx2, mut rx2) = pipe_b.split();
 
         let msg = b"1234567890";
         tx.send(msg).await.unwrap();
@@ -101,7 +101,7 @@ mod tests {
     #[tokio::test]
     async fn test_broken_pipe_on_drop_sender() {
         let (pipe_a, pipe_b) = Pipe::pair();
-        let (mut rx, _tx) = pipe_b.split();
+        let (_tx, mut rx) = pipe_b.split();
 
         // Drop all senders
         drop(pipe_a);
@@ -115,7 +115,7 @@ mod tests {
     #[tokio::test]
     async fn test_broken_pipe_on_drop_receiver() {
         let (pipe_a, pipe_b) = Pipe::pair();
-        let (_rx, tx) = pipe_b.split();
+        let (tx, _rx) = pipe_b.split();
 
         // Drop receiver side
         drop(pipe_a);
@@ -128,8 +128,8 @@ mod tests {
     #[tokio::test]
     async fn test_bidirectional() {
         let (pipe_a, pipe_b) = Pipe::pair();
-        let (mut rx_a, tx_a) = pipe_a.split();
-        let (mut rx_b, tx_b) = pipe_b.split();
+        let (tx_a, mut rx_a) = pipe_a.split();
+        let (tx_b, mut rx_b) = pipe_b.split();
 
         tx_a.send(b"hello").await.unwrap();
         tx_b.send(b"world").await.unwrap();

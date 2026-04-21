@@ -6,6 +6,7 @@ license = "MIT"
 
 [dependencies]
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 bytes = { workspace = true }
 zerocopy = { workspace = true }
 thiserror = { workspace = true }
@@ -13,3 +14,7 @@ tracing = { workspace = true }
 lru = "0.16"
 
 proto = { path = "../proto" }
+
+[dev-dependencies]
+sim = { path = "../sim" }
+tokio = { workspace = true, features = ["time"] }

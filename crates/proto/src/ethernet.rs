@@ -61,19 +61,9 @@ impl EthernetFrame {
     ///
     /// # Errors
     ///
-    /// - [`EthernetError::PayloadTooShort`] — payload under 46 bytes
     /// - [`EthernetError::BroadcastSource`] — src MAC is `ff:ff:ff:ff:ff:ff`
     /// - [`EthernetError::InvalidEtherType`] — EtherType below `0x0600`
     pub fn validate(&self) -> Result<(), EthernetError> {
-        // IEEE 802.3 requires a minimum frame size of 64 bytes.
-        // TAP strips the 4-byte CRC, so the minimum we see is 60 bytes total,
-        // meaning the payload must be at least 60 - 14 = 46 bytes.
-        if self.payload.len() < 46 {
-            return Err(EthernetError::PayloadTooShort {
-                got: self.payload.len(),
-            });
-        }
-
         // A frame cannot originate from a broadcast address
         if self.header.src == [0xff; 6] {
             return Err(EthernetError::BroadcastSource);
@@ -94,8 +84,7 @@ impl EthernetFrame {
     ///
     /// The buffer must be at least `14 + payload.len()` bytes long.
     /// Writes the Ethernet header followed immediately by the payload —
-    /// no padding is added. If the payload is shorter than 46 bytes,
-    /// the caller is responsible for padding before calling this.
+    /// padding to reach the minimum required frame size.
     ///
     /// # Errors
     ///
@@ -122,8 +111,6 @@ impl EthernetFrame {
 pub enum EthernetError {
     #[error("buffer too short: need {needed} bytes for Ethernet header, got {got}")]
     TooShort { needed: usize, got: usize },
-    #[error("payload length too short: got {got} bytes, minimum is 46")]
-    PayloadTooShort { got: usize },
     #[error("source address cannot be broadcast")]
     BroadcastSource,
     #[error("got invalid ethertype: {0:#06x}")]
@@ -138,15 +125,14 @@ mod tests {
 
     use super::*;
 
-    /// Minimal valid Ethernet frame: ARP payload, padded to 46 bytes.
+    /// Minimal valid Ethernet frame: ARP payload, with no padding.
     /// dst: ff:ff:ff:ff:ff:ff  src: aa:bb:cc:dd:ee:ff  ethertype: 0x0806 (ARP)
     fn arp_frame_bytes() -> Bytes {
-        let mut buf = vec![
+        let buf = vec![
             0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // dst MAC
             0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, // src MAC
             0x08, 0x06, // EtherType: ARP
         ];
-        buf.extend_from_slice(&[0u8; 46]); // minimum payload, zero-filled
         buf.into()
     }
 
@@ -159,7 +145,6 @@ mod tests {
         assert_eq!(frame.header.dst, [0xff; 6]);
         assert_eq!(frame.header.src, [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
         assert_eq!(frame.header.ethertype, EtherType::ARP);
-        assert_eq!(frame.payload.len(), 46);
     }
 
     #[test]
@@ -172,8 +157,7 @@ mod tests {
 
     #[test]
     fn parse_header_only_no_payload() {
-        // 14 bytes — valid header, zero-length payload. Parse should succeed,
-        // validate will catch the too-short payload separately.
+        // 14 bytes — valid header, zero-length payload.
         let buf = arp_frame_bytes().slice(..14);
         let frame = EthernetFrame::parse(buf).unwrap();
         assert_eq!(frame.payload.len(), 0);
@@ -195,16 +179,6 @@ mod tests {
         let buf = arp_frame_bytes();
         let frame = EthernetFrame::parse(buf).unwrap();
         assert!(frame.validate().is_ok());
-    }
-
-    #[test]
-    fn validate_payload_too_short() {
-        let buf = arp_frame_bytes().slice(..14 + 45); // one byte short
-        let frame = EthernetFrame::parse(buf).unwrap();
-        assert!(matches!(
-            frame.validate(),
-            Err(EthernetError::PayloadTooShort { got: 45 })
-        ));
     }
 
     #[test]
